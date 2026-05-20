@@ -42,7 +42,6 @@ import { SSMClient, GetParameterCommand } from '@aws-sdk/client-ssm';
  *  BLUEDART_LOGIN_ID      Your BlueDart API Login ID
  *  BLUEDART_LICENCE_KEY   Your BlueDart Licence Key
  *  BLUEDART_API_TYPE      "S" for production, "T" for sandbox (default: "S")
- *  BLUEDART_ENV           "production" | "sandbox"  (default: "production")
  *  BLUEDART_JWT_TOKEN     Your JWT Token for the Authorization header
  *
  * ─── SECURITY NOTE ──────────────────────────────────────────────────────────
@@ -63,6 +62,7 @@ const BASE_URLS = {
 };
 
 let cachedSecrets = null;
+let cachedJwtToken = null;
 
 // ── Credentials (resolved once per cold-start) ────────────────────────────────
 async function getCredentials() {
@@ -115,7 +115,7 @@ async function getCredentials() {
     secrets.BLUEDART_CLIENT_SECRET || process.env.BLUEDART_CLIENT_SECRET;
   const apiType =
     secrets.BLUEDART_API_TYPE || process.env.BLUEDART_API_TYPE || 'S';
-  const jwtToken = secrets.BLUEDART_JWT_TOKEN || process.env.BLUEDART_JWT_TOKEN;
+  const jwtToken = cachedJwtToken || secrets.BLUEDART_JWT_TOKEN || process.env.BLUEDART_JWT_TOKEN;
   const env = secrets.BLUEDART_ENV || process.env.BLUEDART_ENV || 'production';
 
   const s3Bucket = secrets.AWB_S3_BUCKET || process.env.AWB_S3_BUCKET;
@@ -129,7 +129,7 @@ async function getCredentials() {
   const shipperName =
     secrets.BLUEDART_SHIPPER_NAME ||
     process.env.BLUEDART_SHIPPER_NAME ||
-    '';
+    'VYBN';
   const shipperAddress1 =
     secrets.BLUEDART_SHIPPER_ADDRESS1 ||
     process.env.BLUEDART_SHIPPER_ADDRESS1 ||
@@ -254,6 +254,7 @@ async function callBlueDart(creds, path, bodyObj, method = 'POST') {
     try {
       const tokenData = await getToken(creds);
       if (tokenData && tokenData.JWTToken) {
+        cachedJwtToken = tokenData.JWTToken;
         creds.jwtToken = tokenData.JWTToken;
         res = await executeRequest(creds.jwtToken);
       }
@@ -261,6 +262,13 @@ async function callBlueDart(creds, path, bodyObj, method = 'POST') {
       console.error('Token refresh failed:', tokenErr.message);
       // Fall through to original error handling
     }
+  }
+
+  // Retry on transient 5xx errors (e.g. 500 Internal Server Error)
+  if (res.status >= 500) {
+    console.log(`BlueDart API returned ${res.status}. Retrying in 500ms...`);
+    await new Promise((resolve) => setTimeout(resolve, 500));
+    res = await executeRequest(creds.jwtToken);
   }
 
   const contentType = res.headers.get('content-type') || '';
@@ -574,7 +582,7 @@ async function registerPickup(creds, payload) {
         ''
       ).substring(0, 6),
       CustomerName:
-        payload.customerName || creds.shipperDefaults.name || '',
+        payload.customerName || creds.shipperDefaults.name || 'VYBN',
       CustomerPincode: (
         payload.pincode ||
         creds.shipperDefaults.pincode ||
